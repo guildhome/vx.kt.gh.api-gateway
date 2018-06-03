@@ -1,6 +1,7 @@
 package com.mtt.guildhome.api.gateway
 
 import io.netty.handler.codec.http.HttpHeaderValues
+import io.vertx.config.ConfigRetriever
 import io.vertx.core.AbstractVerticle
 import io.vertx.core.AsyncResult
 import io.vertx.core.Handler
@@ -14,6 +15,7 @@ import io.vertx.ext.web.Router
 import io.vertx.kotlin.core.json.get
 import io.vertx.ext.auth.mongo.HashAlgorithm
 import io.vertx.ext.auth.mongo.HashSaltStyle
+import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.client.HttpResponse
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.ext.web.handler.JWTAuthHandler
@@ -23,53 +25,118 @@ import io.vertx.kotlin.ext.auth.jwt.JWTAuthOptions
 import io.vertx.kotlin.ext.auth.jwt.JWTOptions
 import io.vertx.ext.web.handler.CorsHandler;
 import io.vertx.ext.web.client.WebClient
+import io.vertx.ext.web.client.WebClientOptions
+import io.vertx.kotlin.config.ConfigRetrieverOptions
+import io.vertx.kotlin.config.ConfigStoreOptions
+import io.vertx.kotlin.core.json.json
+import io.vertx.kotlin.core.json.obj
 
 
 class MainVerticle : AbstractVerticle() {
 
     val log = LoggerFactory.getLogger(MainVerticle::class.java)
+    var userServiceClient: WebClient? = null
+    var mongoAuth: MongoAuth? = null
+    var jwtProvider: JWTAuth? = null
+
     override fun start() {
-        // your code goes here...
-        var server = vertx.createHttpServer()
-        var userServiceClient = WebClient.create(vertx)
 
-        val mongoClientConfig = createMongoConfig()
-        var mongoClient = MongoClient.createShared(vertx, mongoClientConfig)
 
-        val config = JsonObject()
-        config.put(MongoAuth.PROPERTY_COLLECTION_NAME, "user")
-        config.put(MongoAuth.PROPERTY_SALT_STYLE, HashSaltStyle.COLUMN)
+        var fileStore = ConfigStoreOptions(
+                type = "file",
+                optional = true,
+                config = json {
+                    obj("path" to "./config/config.json")
+                })
 
-        val mongoAuth = MongoAuth.create(mongoClient, config)
-        mongoAuth.hashStrategy.setAlgorithm(HashAlgorithm.PBKDF2)
+        var sysPropsStore = ConfigStoreOptions(
+                type = "sys")
 
-        var jwtConfig = JWTAuthOptions(
-                keyStore = KeyStoreOptions(
-                        path = "keystore.jceks",
-                        password = "secret"))
+        var options = ConfigRetrieverOptions(
+                stores = listOf(fileStore, sysPropsStore))
 
-        var jwtProvider = JWTAuth.create(vertx, jwtConfig)
+        var retriever = ConfigRetriever.create(vertx, options)
 
-        var router = Router.router(vertx)
-        router.route().handler(CorsHandler.create("*"))
-        router.post().handler(BodyHandler.create())
-        router.post("/v1/login").consumes("application/json").produces("application/json").handler(Handler { event ->
+        retriever.getConfig({ it ->
 
-            val json: JsonObject = event.bodyAsJson
+            if(it.succeeded()) {
+                val externalConfig = it.result()
 
-            val userName: String = json["username"]
-            val password: String = json["password"]
+                var server = vertx.createHttpServer()
+                userServiceClient = WebClient.create(vertx, createUserServiceConfig(externalConfig))
 
-            var authInfo = JsonObject(
-                    "username" to "$userName",
-                    "password" to "$password"
-            )
+                val mongoClientConfig = createMongoConfig(externalConfig)
+                var mongoClient = MongoClient.createShared(vertx, mongoClientConfig)
 
-            mongoAuth.authenticate(authInfo, { res ->
+                val config = JsonObject()
+                config.put(MongoAuth.PROPERTY_COLLECTION_NAME, "user")
+                config.put(MongoAuth.PROPERTY_SALT_STYLE, HashSaltStyle.COLUMN)
+
+                mongoAuth = MongoAuth.create(mongoClient, config)
+                mongoAuth!!.hashStrategy.setAlgorithm(HashAlgorithm.PBKDF2)
+
+                var jwtConfig = JWTAuthOptions(
+                        keyStore = KeyStoreOptions(
+                                path = "keystore.jceks",
+                                password = "secret"))
+
+                jwtProvider = JWTAuth.create(vertx, jwtConfig)
+
+                var router = Router.router(vertx)
+                router.route().handler(CorsHandler.create("*"))
+                router.post().handler(BodyHandler.create())
+
+                router.post("/v1/login").consumes("application/json").produces("application/json").handler(this::login)
+                router.post("/v1/user").consumes("application/json").handler(this::postCreateUser)
+
+
+                router.get("/v1/hello").handler(JWTAuthHandler.create(jwtProvider))
+                router.get("/v1/hello").produces(HttpHeaderValues.TEXT_PLAIN.toString()).handler({ event ->
+                    event.user().isAuthorized("normalUser", { it ->
+                        if (it.succeeded()) {
+                            //check permission
+                            event.response().setStatusCode(200).end("success")
+                        } else {
+                            event.response().setStatusCode(401).end()
+                        }
+                    })
+                })
+
+                router.route().handler({ routingContext ->
+
+                    // This handler will be called for every request
+                    var response = routingContext.response()
+                    response.putHeader("content-type", "text/plain")
+
+                    // Write to the response and end it
+                    response.end("Hello World from Vert.x-Web!")
+                })
+
+                server.requestHandler({ router.accept(it) }).listen(8080)
+            }
+            else
+            {
+                log.error("App failed to launch")
+            }
+        })
+    }
+
+    fun login(event: RoutingContext) {
+        val json: JsonObject = event.bodyAsJson
+
+        val userName: String = json["username"]
+        val password: String = json["password"]
+
+        var authInfo = JsonObject(
+                "username" to "$userName",
+                "password" to "$password"
+        )
+        try {
+            mongoAuth!!.authenticate(authInfo, { res ->
                 if (res.succeeded()) {
                     var user = res.result()
                     log.info("Found Mongo Auth User")
-                    userServiceClient.get(8081, "localhost", "/v1/user")
+                    userServiceClient!!.get( "/v1/user")
                             .addQueryParam("username", userName)
                             .send(Handler { it ->
                                 log.info("Got Response from the user Service")
@@ -82,7 +149,7 @@ class MainVerticle : AbstractVerticle() {
 
 //                                 val userProfile = parseUserProfileFromJson(response.bodyAsJsonObject())
                                         var userProfileAsJson = response.bodyAsJsonObject()
-                                        var token = jwtProvider.generateToken(
+                                        var token = jwtProvider!!.generateToken(
                                                 user.principal()
                                                 , JWTOptions())
                                         // now for any request to protected resources you should pass this string in the HTTP header Authorization as:
@@ -104,90 +171,55 @@ class MainVerticle : AbstractVerticle() {
                     event.response().setStatusCode(401).end(res.cause().message)
                 }
             })
+        }
+        catch (e: Exception){
+            event.response().setStatusCode(500).end("A provider was null")
+        }
+
+    }
+
+    fun postCreateUser(event: RoutingContext) {
+
+        val json = event.bodyAsJson
+        val userName: String = json["username"]
+        val handle: String = json["handle"]
+        val password: String = json["password"]
+
+        val newUserProfile: JsonObject = UserProfile("", userName, handle, userName, ArrayList()).toJson()
+
+        //remove blank id
+        newUserProfile.remove("id")
+
+        mongoAuth!!.insertUser(userName, password, listOf("normalUser"), ArrayList<String>(), Handler { results ->
+
+            if (results.succeeded()) {
+                userServiceClient!!.post( "/v1/user")
+                        .sendJsonObject(newUserProfile, Handler { it: AsyncResult<HttpResponse<Buffer>> ->
+
+                            if (it.succeeded()) {
+                                event.response().setStatusCode(201).end()
+                            } else {
+                                //we need roll back the mongo update.... Or delete it directly.
+                                //It might just be easier to do this in the opposite order.
+                                event.response().setStatusCode(500).end()
+                            }
+                        })
+            } else {
+                event.response().setStatusCode(500).end(results.cause().toString())
+            }
 
         })
 
-        router.post("/v1/user").consumes("application/json").handler({ event ->
-            val json = event.bodyAsJson
-            val userName: String = json["username"]
-            val handle: String = json["handle"]
-            val password: String = json["password"]
-
-            val newUserProfile: JsonObject = UserProfile("", userName, handle, userName, ArrayList()).toJson()
-
-            //remove blank id
-            newUserProfile.remove("id")
-
-            mongoAuth.insertUser(userName, password, listOf("normalUser"), ArrayList<String>(), Handler { results ->
-
-                if (results.succeeded()) {
-                    userServiceClient.post(8081, "localhost", "/v1/user")
-                            .sendJsonObject(newUserProfile, Handler { it: AsyncResult<HttpResponse<Buffer>> ->
-
-                                if (it.succeeded()) {
-                                    event.response().setStatusCode(201).end()
-                                } else {
-                                    //we need roll back the mongo update.... Or delete it directly.
-                                    //It might just be easier to do this in the opposite order.
-                                    event.response().setStatusCode(500).end()
-                                }
-                            })
-                } else {
-                    event.response().setStatusCode(500).end(results.cause().toString())
-                }
-
-            })
-        })
-        router.get("/v1/hello").handler(JWTAuthHandler.create(jwtProvider))
-        router.get("/v1/hello").produces(HttpHeaderValues.TEXT_PLAIN.toString()).handler({ event ->
-            //      val token = event.request().getHeader("Authorization")
-//
-//      jwtProvider.authenticate(json {
-//            obj("jwt" to "$token")
-//
-//      }, Handler{it: AsyncResult<User> ->
-//
-//        if(it.succeeded())
-//        {
-//          //check permission
-//          event.response().setStatusCode(200).end("sucess")
-//        }
-//        else
-//        {
-//          event.response().setStatusCode(401).end()
-//        }
-//      })
-            event.user().isAuthorized("normalUser", { it ->
-                if (it.succeeded()) {
-                    //check permission
-                    event.response().setStatusCode(200).end("sucess")
-                } else {
-                    event.response().setStatusCode(401).end()
-                }
-            })
-
-        })
-
-        router.route().handler({ routingContext ->
-
-            // This handler will be called for every request
-            var response = routingContext.response()
-            response.putHeader("content-type", "text/plain")
-
-            // Write to the response and end it
-            response.end("Hello World from Vert.x-Web!")
-        })
-
-        server.requestHandler({ router.accept(it) }).listen(8080)
     }
 }
 
+fun createUserServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("USER:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("USER:SERVICE:PORT", 8081))
 
-fun createMongoConfig(): JsonObject = JsonObject("{\n" +
+fun createMongoConfig(config: JsonObject): JsonObject = JsonObject("{\n" +
 //        "  // Single Cluster Settings\n" +
-        "  \"host\" : \"192.168.72.107\"," +
+        "  \"host\" : \"${config.getString("MONGO:HOST", "localhost")}\"," +
         "  \"port\" : 27017,\n" +
-        " \"db_name\":\"test\"" +
+        " \"db_name\":\"auth\"" +
 //        "\n" +
 //        "  // Multiple Cluster Settings\n" +
 //        "  \"hosts\" : [\n" +
