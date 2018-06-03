@@ -6,6 +6,7 @@ import io.vertx.core.AbstractVerticle
 import io.vertx.core.AsyncResult
 import io.vertx.core.Handler
 import io.vertx.core.buffer.Buffer
+import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
 import io.vertx.core.logging.LoggerFactory
 import io.vertx.ext.auth.jwt.JWTAuth
@@ -36,6 +37,7 @@ class MainVerticle : AbstractVerticle() {
 
     val log = LoggerFactory.getLogger(MainVerticle::class.java)
     var userServiceClient: WebClient? = null
+    var postServiceClient: WebClient? = null
     var mongoAuth: MongoAuth? = null
     var jwtProvider: JWTAuth? = null
 
@@ -59,11 +61,13 @@ class MainVerticle : AbstractVerticle() {
 
         retriever.getConfig({ it ->
 
-            if(it.succeeded()) {
+            if (it.succeeded()) {
                 val externalConfig = it.result()
 
                 var server = vertx.createHttpServer()
+
                 userServiceClient = WebClient.create(vertx, createUserServiceConfig(externalConfig))
+                postServiceClient = WebClient.create(vertx, createPostServiceConfig(externalConfig))
 
                 val mongoClientConfig = createMongoConfig(externalConfig)
                 var mongoClient = MongoClient.createShared(vertx, mongoClientConfig)
@@ -82,13 +86,20 @@ class MainVerticle : AbstractVerticle() {
 
                 jwtProvider = JWTAuth.create(vertx, jwtConfig)
 
+
+                /**
+                 * Start routing.
+                 */
                 var router = Router.router(vertx)
                 router.route().handler(CorsHandler.create("*"))
                 router.post().handler(BodyHandler.create())
+                router.put().handler(BodyHandler.create())
 
                 router.post("/v1/login").consumes("application/json").produces("application/json").handler(this::login)
                 router.post("/v1/user").consumes("application/json").handler(this::postCreateUser)
 
+                router.route("/v1/*").handler(JWTAuthHandler.create(jwtProvider))
+                router.route("/v1/guilds/:guildId/posts*").handler(this::proxyPostCall)
 
                 router.get("/v1/hello").handler(JWTAuthHandler.create(jwtProvider))
                 router.get("/v1/hello").produces(HttpHeaderValues.TEXT_PLAIN.toString()).handler({ event ->
@@ -113,10 +124,87 @@ class MainVerticle : AbstractVerticle() {
                 })
 
                 server.requestHandler({ router.accept(it) }).listen(8080)
-            }
-            else
-            {
+                log.info("End of the Router setup")
+            } else {
                 log.error("App failed to launch")
+            }
+        })
+    }
+
+    fun proxyPostCall(event: RoutingContext) {
+        val guildId = event.request().getParam("guildId")
+        event.user().isAuthorized(guildId, { it ->
+            if (it.succeeded()) {
+                val requestToProxy = event.request()
+                val postServiceRequest = postServiceClient!!.request(requestToProxy.method(), requestToProxy.uri())
+
+                for (header in requestToProxy.headers().entries()) {
+                    postServiceRequest.putHeader(header.key, header.value)
+                }
+
+                when (requestToProxy.method()) {
+                    HttpMethod.POST, HttpMethod.PUT -> {
+
+                        postServiceRequest
+                                .timeout(2000L)
+                                .sendBuffer(event.body, Handler {
+
+                                    if (it.succeeded()) {
+                                        val postServiceResponse = it.result()
+
+                                        val respOut = event.response()
+
+                                        for (header in postServiceResponse.headers().entries()) {
+                                            respOut.putHeader(header.key, header.value)
+                                        }
+
+                                        respOut.setStatusCode(postServiceResponse.statusCode())
+
+                                        val body: Buffer? = postServiceResponse.body()
+
+                                        if (body != null) {
+                                            respOut.end(body)
+                                        } else {
+                                            respOut.end()
+                                        }
+
+                                    } else {
+                                        event.response().setStatusCode(500).end()
+                                    }
+                                })
+                    }
+                    else ->
+                        postServiceRequest
+                                .send(Handler {
+
+                                    if (it.succeeded()) {
+
+                                        val postServiceResponse = it.result()
+
+                                        val respOut = event.response()
+
+                                        for (header in postServiceResponse.headers().entries()) {
+                                            respOut.putHeader(header.key, header.value)
+                                        }
+
+                                        respOut.setStatusCode(postServiceResponse.statusCode())
+
+                                        val body: Buffer? = postServiceResponse.body()
+
+                                        if (body != null) {
+                                            respOut.end(body)
+                                        } else {
+                                            respOut.end()
+                                        }
+
+                                    } else {
+                                        event.response().setStatusCode(500).end()
+                                    }
+                                })
+                }
+
+            } else {
+                event.response().setStatusCode(401).end()
             }
         })
     }
@@ -136,7 +224,7 @@ class MainVerticle : AbstractVerticle() {
                 if (res.succeeded()) {
                     var user = res.result()
                     log.info("Found Mongo Auth User")
-                    userServiceClient!!.get( "/v1/user")
+                    userServiceClient!!.get("/v1/user")
                             .addQueryParam("username", userName)
                             .send(Handler { it ->
                                 log.info("Got Response from the user Service")
@@ -171,8 +259,7 @@ class MainVerticle : AbstractVerticle() {
                     event.response().setStatusCode(401).end(res.cause().message)
                 }
             })
-        }
-        catch (e: Exception){
+        } catch (e: Exception) {
             event.response().setStatusCode(500).end("A provider was null")
         }
 
@@ -193,7 +280,8 @@ class MainVerticle : AbstractVerticle() {
         mongoAuth!!.insertUser(userName, password, listOf("normalUser"), ArrayList<String>(), Handler { results ->
 
             if (results.succeeded()) {
-                userServiceClient!!.post( "/v1/user")
+                userServiceClient!!.post("/v1/user")
+                        .timeout(2000L)
                         .sendJsonObject(newUserProfile, Handler { it: AsyncResult<HttpResponse<Buffer>> ->
 
                             if (it.succeeded()) {
@@ -214,6 +302,7 @@ class MainVerticle : AbstractVerticle() {
 }
 
 fun createUserServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("USER:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("USER:SERVICE:PORT", 8081))
+fun createPostServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("POST:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("POST:SERVICE:PORT", 8082))
 
 fun createMongoConfig(config: JsonObject): JsonObject = JsonObject("{\n" +
 //        "  // Single Cluster Settings\n" +
