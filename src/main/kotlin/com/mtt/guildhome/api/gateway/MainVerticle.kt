@@ -54,8 +54,11 @@ class MainVerticle : AbstractVerticle() {
         var sysPropsStore = ConfigStoreOptions(
                 type = "sys")
 
+        var envPropsStore = ConfigStoreOptions(
+                type = "env")
+
         var options = ConfigRetrieverOptions(
-                stores = listOf(fileStore, sysPropsStore))
+                stores = listOf(envPropsStore, fileStore, sysPropsStore))
 
         var retriever = ConfigRetriever.create(vertx, options)
 
@@ -63,7 +66,7 @@ class MainVerticle : AbstractVerticle() {
 
             if (it.succeeded()) {
                 val externalConfig = it.result()
-
+                log.info("${externalConfig.encodePrettily()}")
                 var server = vertx.createHttpServer()
 
                 userServiceClient = WebClient.create(vertx, createUserServiceConfig(externalConfig))
@@ -302,7 +305,7 @@ class MainVerticle : AbstractVerticle() {
 }
 
 fun createUserServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("USER:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("USER:SERVICE:PORT", 8081))
-fun createPostServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("POST:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("POST:SERVICE:PORT", 8082))
+fun createPostServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("POST:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("POST:SERVICE:PORT", 8080))
 
 fun createMongoConfig(config: JsonObject): JsonObject = JsonObject("{\n" +
 //        "  // Single Cluster Settings\n" +
