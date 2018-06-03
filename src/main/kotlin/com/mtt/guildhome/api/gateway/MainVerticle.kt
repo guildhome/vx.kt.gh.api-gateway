@@ -8,7 +8,6 @@ import io.vertx.core.Handler
 import io.vertx.core.buffer.Buffer
 import io.vertx.core.http.HttpMethod
 import io.vertx.core.json.JsonObject
-import io.vertx.core.logging.LoggerFactory
 import io.vertx.ext.auth.jwt.JWTAuth
 import io.vertx.ext.auth.mongo.MongoAuth
 import io.vertx.ext.mongo.MongoClient
@@ -17,6 +16,7 @@ import io.vertx.kotlin.core.json.get
 import io.vertx.ext.auth.mongo.HashAlgorithm
 import io.vertx.ext.auth.mongo.HashSaltStyle
 import io.vertx.ext.web.RoutingContext
+import io.vertx.ext.web.client.HttpRequest
 import io.vertx.ext.web.client.HttpResponse
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.ext.web.handler.JWTAuthHandler
@@ -27,10 +27,12 @@ import io.vertx.kotlin.ext.auth.jwt.JWTOptions
 import io.vertx.ext.web.handler.CorsHandler;
 import io.vertx.ext.web.client.WebClient
 import io.vertx.ext.web.client.WebClientOptions
+import io.vertx.ext.web.handler.LoggerHandler
 import io.vertx.kotlin.config.ConfigRetrieverOptions
 import io.vertx.kotlin.config.ConfigStoreOptions
 import io.vertx.kotlin.core.json.json
 import io.vertx.kotlin.core.json.obj
+import org.slf4j.LoggerFactory
 
 
 class MainVerticle : AbstractVerticle() {
@@ -97,6 +99,7 @@ class MainVerticle : AbstractVerticle() {
                 router.route().handler(CorsHandler.create("*"))
                 router.post().handler(BodyHandler.create())
                 router.put().handler(BodyHandler.create())
+                router.route().handler(LoggerHandler.create())
 
                 router.post("/v1/login").consumes("application/json").produces("application/json").handler(this::login)
                 router.post("/v1/user").consumes("application/json").handler(this::postCreateUser)
@@ -104,7 +107,7 @@ class MainVerticle : AbstractVerticle() {
                 router.route("/v1/*").handler(JWTAuthHandler.create(jwtProvider))
                 router.route("/v1/guilds/:guildId/posts*").handler(this::proxyPostCall)
 
-                router.get("/v1/hello").handler(JWTAuthHandler.create(jwtProvider))
+            
                 router.get("/v1/hello").produces(HttpHeaderValues.TEXT_PLAIN.toString()).handler({ event ->
                     event.user().isAuthorized("normalUser", { it ->
                         if (it.succeeded()) {
@@ -116,15 +119,15 @@ class MainVerticle : AbstractVerticle() {
                     })
                 })
 
-                router.route().handler({ routingContext ->
+                // router.route().handler({ routingContext ->
 
-                    // This handler will be called for every request
-                    var response = routingContext.response()
-                    response.putHeader("content-type", "text/plain")
+                //     // This handler will be called for every request
+                //     var response = routingContext.response()
+                //     response.putHeader("content-type", "text/plain")
 
-                    // Write to the response and end it
-                    response.end("Hello World from Vert.x-Web!")
-                })
+                //     // Write to the response and end it
+                //     response.end("Hello World from Vert.x-Web!")
+                // })
 
                 server.requestHandler({ router.accept(it) }).listen(8080)
                 log.info("End of the Router setup")
@@ -134,12 +137,14 @@ class MainVerticle : AbstractVerticle() {
         })
     }
 
-    fun proxyPostCall(event: RoutingContext) {
-        val guildId = event.request().getParam("guildId")
-        event.user().isAuthorized(guildId, { it ->
-            if (it.succeeded()) {
-                val requestToProxy = event.request()
-                val postServiceRequest = postServiceClient!!.request(requestToProxy.method(), requestToProxy.uri())
+    fun proxyPostCall(proxyCall: RoutingContext) {
+        log.info("Proxy Call!!!")
+        log.info("When starting the Response status: ${proxyCall.response().ended()}")
+        val guildId = proxyCall.request().getParam("guildId")
+        proxyCall.user().isAuthorized(guildId, Handler { authorization ->
+            if (authorization.succeeded()) {
+                val requestToProxy = proxyCall.request()
+                val postServiceRequest: HttpRequest<Buffer> = postServiceClient!!.request(requestToProxy.method(), requestToProxy.uri())
 
                 for (header in requestToProxy.headers().entries()) {
                     postServiceRequest.putHeader(header.key, header.value)
@@ -147,36 +152,38 @@ class MainVerticle : AbstractVerticle() {
 
                 when (requestToProxy.method()) {
                     HttpMethod.POST, HttpMethod.PUT -> {
-
+                        log.info("Sending the request to the microservice")
                         postServiceRequest
                                 .timeout(2000L)
-                                .sendBuffer(event.body, Handler {
+                                .sendBuffer(proxyCall.body, Handler {
 
                                     if (it.succeeded()) {
+                                        log.info("Response to the request from the microservice")
                                         val postServiceResponse = it.result()
+//
+                                        // var respOut = proxyCall.response()
+                                        log.info("When created Response status: ${proxyCall.response().ended()}")
+                                        proxyCall.response().headers().setAll(postServiceResponse.headers())
 
-                                        val respOut = event.response()
-
-                                        for (header in postServiceResponse.headers().entries()) {
-                                            respOut.putHeader(header.key, header.value)
-                                        }
-
-                                        respOut.setStatusCode(postServiceResponse.statusCode())
-
+                                        log.info("After headers have been added Response status: ${proxyCall.response().ended()}")
+                                        proxyCall.response().setStatusCode(postServiceResponse.statusCode())
+//
                                         val body: Buffer? = postServiceResponse.body()
-
+                                        log.info("After body has been extracted Response status: ${proxyCall.response().ended()}")
                                         if (body != null) {
-                                            respOut.end(body)
+                                            proxyCall.response().end(body)
                                         } else {
-                                            respOut.end()
+                                            log.info("No body found for request")
+                                            proxyCall.response().end()
                                         }
 
                                     } else {
-                                        event.response().setStatusCode(500).end()
+                                        proxyCall.response().setStatusCode(500).end()
                                     }
                                 })
                     }
-                    else ->
+                    else -> {
+                        log.info("When else being called.")
                         postServiceRequest
                                 .send(Handler {
 
@@ -184,7 +191,7 @@ class MainVerticle : AbstractVerticle() {
 
                                         val postServiceResponse = it.result()
 
-                                        val respOut = event.response()
+                                        val respOut = proxyCall.response()
 
                                         for (header in postServiceResponse.headers().entries()) {
                                             respOut.putHeader(header.key, header.value)
@@ -201,13 +208,14 @@ class MainVerticle : AbstractVerticle() {
                                         }
 
                                     } else {
-                                        event.response().setStatusCode(500).end()
+                                        proxyCall.response().setStatusCode(500).end()
                                     }
                                 })
+                    }
                 }
 
             } else {
-                event.response().setStatusCode(401).end()
+                proxyCall.response().setStatusCode(401).end()
             }
         })
     }

@@ -35,6 +35,8 @@ dependencies {
   compile 'io.vertx:vertx-auth-jwt:3.5.1'
   compile 'io.vertx:vertx-web-client:3.5.1'
   compile 'io.vertx:vertx-config:3.5.1'
+  compile group: 'ch.qos.logback', name: 'logback-classic', version: '1.0.13'
+  compile group: 'org.slf4j', name: 'slf4j-api', version: '1.7.25'
 
 
 
