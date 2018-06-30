@@ -1,0 +1,33 @@
+version: "3"
+services:
+  api_gateway:
+    image: vx.kt.gh.api-gateway
+    environment:
+      - MONGO:HOST=mongo
+      - USER:SERVICE:HOST=userservice
+      - POST:SERVICE:HOST=guildpost
+    ports:
+      - 8080:8080
+    depends_on:
+      - userservice
+      - guildpost
+      - mongo
+  
+  userservice:
+    image: vx.kt.gh.api-gateway
+    environment:
+      - MONGO:HOST=mongo
+    depends_on:
+      - mongo
+  guildpost:
+    image: sp.jv.guild-post
+    ports:
+      - 8081:8080
+    depends_on:
+      - mongo
+  
+  mongo:
+    image: mongo
+    ports:
+      - 27017:27017
+
