@@ -3,9 +3,9 @@ services:
   api_gateway:
     image: vx.kt.gh.api-gateway
     environment:
-      - MONGO:HOST=mongo
-      - USER:SERVICE:HOST=userservice
-      - POST:SERVICE:HOST=guildpost
+      - MONGO_HOST=mongo
+      - USER_SERVICE_HOST=userservice
+      - POST_SERVICE_HOST=guildpost
     ports:
       - 8080:8080
     depends_on:
@@ -16,11 +16,13 @@ services:
   userservice:
     image: vx.kt.gh.api-gateway
     environment:
-      - MONGO:HOST=mongo
+      - MONGO_HOST=mongo
     depends_on:
       - mongo
   guildpost:
     image: sp.jv.guild-post
+    environment:
+      - MONGO_HOST=mongo
     ports:
       - 8081:8080
     depends_on:

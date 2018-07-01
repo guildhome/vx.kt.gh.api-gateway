@@ -312,12 +312,12 @@ class MainVerticle : AbstractVerticle() {
     }
 }
 
-fun createUserServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("USER:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("USER:SERVICE:PORT", 8081))
-fun createPostServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("POST:SERVICE:HOST", "localhost")).setDefaultPort(config.getInteger("POST:SERVICE:PORT", 8080))
+fun createUserServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("USER_SERVICE_HOST", "localhost")).setDefaultPort(config.getInteger("USER_SERVICE_PORT", 8081))
+fun createPostServiceConfig(config: JsonObject) = WebClientOptions().setDefaultHost(config.getString("POST_SERVICE_HOST", "localhost")).setDefaultPort(config.getInteger("POST_SERVICE_PORT", 8080))
 
 fun createMongoConfig(config: JsonObject): JsonObject = JsonObject("{\n" +
 //        "  // Single Cluster Settings\n" +
-        "  \"host\" : \"${config.getString("MONGO:HOST", "localhost")}\"," +
+        "  \"host\" : \"${config.getString("MONGO_HOST", "localhost")}\"," +
         "  \"port\" : 27017,\n" +
         " \"db_name\":\"auth\"" +
 //        "\n" +
